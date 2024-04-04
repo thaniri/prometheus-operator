@@ -320,6 +320,9 @@ func testAllNSPrometheus(t *testing.T) {
 		"PrometheusAgentCheckStorageClass":          testAgentCheckStorageClass,
 		"PrometheusAgentStatusScale":                testPrometheusAgentStatusScale,
 		"PrometheusStatusScale":                     testPrometheusStatusScale,
+		"PrometheusScaleDownStrategies":             testPrometheusScaleDownStrategies,
+		"PrometheusScaleUpAfterScaleDown":           testPrometheusScaleUpAfterScaleDown,
+		"PrometheusScaleDownCustomRetention":        testPrometheusScaleDownCustomRetention,
 	}
 
 	for name, f := range testFuncs {

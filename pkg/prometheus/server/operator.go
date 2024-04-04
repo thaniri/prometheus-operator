@@ -92,6 +92,8 @@ type Operator struct {
 	canReadStorageClass    bool
 
 	eventRecorder record.EventRecorder
+
+	now func() time.Time // In real environments, this is time.Now. In tests, it can be mocked.
 }
 
 // New creates a new controller.
@@ -140,6 +142,8 @@ func New(ctx context.Context, restConfig *rest.Config, c operator.Config, logger
 		canReadStorageClass:   canReadStorageClass,
 
 		eventRecorder: erf(client, controllerName),
+
+		now: time.Now,
 	}
 	o.metrics.MustRegister(o.reconciliations)
 
@@ -798,13 +802,13 @@ func (c *Operator) sync(ctx context.Context, key string) error {
 
 	// Ensure we have a StatefulSet running Prometheus deployed and that StatefulSet names are created correctly.
 	expected := prompkg.ExpectedStatefulSetShardNames(p)
-	for shard, ssetName := range expected {
-		logger := log.With(logger, "statefulset", ssetName, "shard", fmt.Sprintf("%d", shard))
+	for shardNumber, ssetName := range expected {
+		logger := log.With(logger, "statefulset", ssetName, "shard", fmt.Sprintf("%d", shardNumber))
 		level.Debug(logger).Log("msg", "reconciling statefulset")
 
-		obj, err := c.ssetInfs.Get(prompkg.KeyToStatefulSetKey(p, key, shard))
+		obj, err := c.ssetInfs.Get(prompkg.KeyToStatefulSetKey(p, key, shardNumber))
 		exists := !apierrors.IsNotFound(err)
-		if err != nil && !apierrors.IsNotFound(err) {
+		if err != nil && exists {
 			return fmt.Errorf("retrieving statefulset failed: %w", err)
 		}
 
@@ -847,7 +851,7 @@ func (c *Operator) sync(ctx context.Context, key string) error {
 			cg,
 			ruleConfigMapNames,
 			newSSetInputHash,
-			int32(shard),
+			int32(shardNumber),
 			tlsAssets)
 		if err != nil {
 			return fmt.Errorf("making statefulset failed: %w", err)
@@ -918,9 +922,17 @@ func (c *Operator) sync(ctx context.Context, key string) error {
 			return
 		}
 
-		propagationPolicy := metav1.DeletePropagationForeground
-		if err := ssetClient.Delete(ctx, s.GetName(), metav1.DeleteOptions{PropagationPolicy: &propagationPolicy}); err != nil {
+		shouldDelete, err := c.checkDeletionDecision(p, s)
+		if err != nil {
 			level.Error(c.logger).Log("err", err, "name", s.GetName(), "namespace", s.GetNamespace())
+			return
+		}
+
+		if shouldDelete {
+			if err := ssetClient.Delete(ctx, s.GetName(), metav1.DeleteOptions{PropagationPolicy: ptr.To(metav1.DeletePropagationForeground)}); err != nil {
+				level.Error(c.logger).Log("err", err, "name", s.GetName(), "namespace", s.GetNamespace())
+			}
+			return
 		}
 	})
 	if err != nil {
@@ -928,6 +940,55 @@ func (c *Operator) sync(ctx context.Context, key string) error {
 	}
 
 	return nil
+}
+
+func (c *Operator) checkDeletionDecision(p *monitoringv1.Prometheus, sts *appsv1.StatefulSet) (bool, error) {
+	srp := p.Spec.ShardRetentionPolicy
+	if srp == nil || srp.WhenScaled == string(monitoringv1.WhenScaledRetentionTypeDelete) {
+		return true, nil
+	}
+
+	retentionAnnotation, ok := sts.Annotations["operator.prometheus.io/deletion-timestamp"]
+	if !ok {
+		// This statefulset was not marked for deletion yet. Let's just add the annotation and return.
+		sts.Annotations["operator.prometheus.io/deletion-timestamp"] = c.getRetentionDate(p)
+		return false, nil
+	}
+	retentionAsTime, err := time.Parse(time.RFC3339, retentionAnnotation)
+	if err != nil {
+		return false, fmt.Errorf("failed to parse retention annotation 'operator.prometheus.io/deletion-timestamp': %w", err)
+	}
+	if c.now().After(retentionAsTime) {
+		return true, nil
+	}
+
+	// We should never get here, but just in case we do, we return false for safety.
+	return false, nil
+}
+
+func (c *Operator) getRetentionDate(p *monitoringv1.Prometheus) string {
+	if p.Spec.ShardRetentionPolicy.Retention != nil {
+		duration, err := p.Spec.ShardRetentionPolicy.Retention.AsTimeDuration()
+		if err != nil {
+			// Duration should have been validated by K8S API server.
+			panic(err)
+		}
+		return c.now().Add(duration).Format(time.RFC3339)
+	}
+
+	if p.Spec.Retention != "" {
+		duration, err := p.Spec.Retention.AsTimeDuration()
+		if err != nil {
+			// Duration should have been validated by K8S API server.
+			panic(err)
+		}
+		return c.now().Add(duration).Format(time.RFC3339)
+	}
+
+	// Retention policy set to Retain, but no retention information is provided,
+	// e.g. ShardRetentionPolicy.Retention or Retention, we retain "forever".
+	// 100 Years.
+	return c.now().Add(24 * time.Hour * 365 * 100).Format(time.RFC3339)
 }
 
 // UpdateStatus updates the status subresource of the object identified by the given

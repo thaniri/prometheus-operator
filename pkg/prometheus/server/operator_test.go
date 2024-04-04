@@ -16,7 +16,9 @@ package prometheus
 
 import (
 	"testing"
+	"time"
 
+	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -237,6 +239,59 @@ func TestCreateStatefulSetInputHash(t *testing.T) {
 			if p1Hash == p2Hash {
 				t.Fatal("expected same Prometheus CRDs with different statefulset specs to produce different hashes but got equal hash")
 			}
+		})
+	}
+}
+
+func TestCheckDeletionDecision(t *testing.T) {
+	now := time.Now()
+	o := &Operator{
+		now: func() time.Time { return now },
+	}
+
+	for _, tc := range []struct {
+		name                 string
+		stsDeletionTimestamp string
+		retentionPolicy      monitoringv1.WhenScaledRetentionType
+		expecedDecision      bool
+	}{
+		{
+			name:            "delete policy",
+			retentionPolicy: monitoringv1.WhenScaledRetentionTypeDelete,
+			expecedDecision: true,
+		},
+		{
+			name:                 "retention in the past",
+			stsDeletionTimestamp: now.Add(time.Hour * -1).Format(time.RFC3339),
+			retentionPolicy:      monitoringv1.WhenScaledRetentionTypeRetain,
+			expecedDecision:      true,
+		},
+		{
+			name:                 "retention in the future",
+			stsDeletionTimestamp: now.Add(time.Hour * 1).Format(time.RFC3339),
+			retentionPolicy:      monitoringv1.WhenScaledRetentionTypeRetain,
+			expecedDecision:      false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := monitoringv1.Prometheus{
+				Spec: monitoringv1.PrometheusSpec{
+					ShardRetentionPolicy: &monitoringv1.ShardRetentionPolicy{
+						WhenScaled: string(tc.retentionPolicy),
+					},
+				},
+			}
+			sts := appsv1.StatefulSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						"operator.prometheus.io/deletion-timestamp": tc.stsDeletionTimestamp,
+					},
+				},
+			}
+
+			decision, err := o.checkDeletionDecision(&p, &sts)
+			require.NoError(t, err)
+			require.Equal(t, tc.expecedDecision, decision)
 		})
 	}
 }
