@@ -84,7 +84,12 @@ func NewClusterConfig(host string, tlsConfig rest.TLSClientConfig, asUser string
 	var cfg *rest.Config
 	var err error
 
-	kubeconfigPath := os.Getenv(KubeConfigEnv)
+	kubeconfigPath := "~/.kube/config"
+	kubeconfigFromEnv := os.Getenv(KubeConfigEnv)
+	if kubeconfigFromEnv != "" {
+		kubeconfigPath = kubeconfigFromEnv
+	}
+	
 	if kubeconfigPath != "" {
 		loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
 		cfg, err = clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, &clientcmd.ConfigOverrides{}).ClientConfig()
